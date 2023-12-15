@@ -54,10 +54,10 @@ pip install ./r3dg-rasterization
 Download the NeRF synthetic dataset from [LINK](https://drive.google.com/drive/folders/1JDdLGDruGNXWnM1eqY1FNL9PlStjaKWi?usp=drive_link) provided by [NeRF](https://github.com/bmild/nerf).
 
 #### Pre-processed DTU
-For real-world DTU data, we follow the [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the depth maps and then filter the depth map through photometric and geometric check. We then convert the depth map to normal through [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html). And we get perfect masks from [IDR](https://github.com/lioryariv/idr). The pre-process DTU data can be downloaded [here](https://box.nju.edu.cn/f/987c7bcd7bb94cd1876d/?dl=1).  
+For real-world DTU data, we follow the [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the depth maps and then filter the depth map through photometric and geometric check. We then convert the depth map to normal through [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html). And we get perfect masks from [IDR](https://github.com/lioryariv/idr). The pre-processed DTU data can be downloaded [here](https://box.nju.edu.cn/f/987c7bcd7bb94cd1876d/?dl=1).  
 
 #### Pre-processed Tanks and Temples
-For real-world Tanks and Temples data, we also use [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) and [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html) to get the filtered MVS depth maps and normal maps. The masks are from [NSVF](https://github.com/facebookresearch/NSVF). The pre-process Tanks and Temples data can be downloaded [here](https://box.nju.edu.cn/f/73769e8bfa834889894b/?dl=1).  
+For real-world Tanks and Temples data, we also use [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) and [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html) to get the filtered MVS depth maps and normal maps. The masks are from [NSVF](https://github.com/facebookresearch/NSVF). The pre-processed Tanks and Temples data can be downloaded [here](https://box.nju.edu.cn/f/73769e8bfa834889894b/?dl=1).  
 
 #### Data Structure
 We organize the datasets like this:
