@@ -1,0 +1,15 @@
+name: r3dg
+dependencies:
+  - matplotlib=3.5.2
+  - numpy=1.21.5
+  - python=3.7.13
+  - tensorboard=2.10.0
+  - tqdm=4.64.1
+  - pip=22.3.1
+  - pip:
+      - dearpygui==1.10.1
+      - imageio==2.31.2
+      - opencv-python==4.1.0.25
+      - pillow==9.5.0
+      - plyfile==0.9
+      - scipy==1.7.3
