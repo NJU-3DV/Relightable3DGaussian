@@ -54,10 +54,10 @@ pip install ./r3dg-rasterization
 Download the NeRF synthetic dataset from [LINK](https://drive.google.com/drive/folders/1JDdLGDruGNXWnM1eqY1FNL9PlStjaKWi?usp=drive_link) provided by [NeRF](https://github.com/bmild/nerf).
 
 #### Pre-processed DTU
-For real-world DTU data, we follow the [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the depth maps and then filter the depth map through photometric and geometric check. We then convert the depth map to normal through [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html). And we get perfect masks from [IDR](https://github.com/lioryariv/idr). The pre-processed DTU data can be downloaded [here](https://box.nju.edu.cn/f/987c7bcd7bb94cd1876d/?dl=1).  
+For real-world DTU data, we follow the [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the depth maps and then filter the depth map through photometric and geometric check. We then convert the depth map to normal through [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html). And we get perfect masks from [IDR](https://github.com/lioryariv/idr). The pre-processed DTU data can be downloaded [here](https://box.nju.edu.cn/f/d9858b670ab9480fb526/?dl=1).  
 
 #### Pre-processed Tanks and Temples
-For real-world Tanks and Temples data, we also use [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) and [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html) to get the filtered MVS depth maps and normal maps. The masks are from [NSVF](https://github.com/facebookresearch/NSVF). The pre-processed Tanks and Temples data can be downloaded [here](https://box.nju.edu.cn/f/73769e8bfa834889894b/?dl=1).  
+For real-world Tanks and Temples data, we also use [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) and [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html) to get the filtered MVS depth maps and normal maps. The masks are from [NSVF](https://github.com/facebookresearch/NSVF). The pre-processed Tanks and Temples data can be downloaded [here](https://box.nju.edu.cn/f/f0b094cc22bf4934a000/?dl=1).  
 
 #### Data Structure
 We organize the datasets like this:
@@ -92,7 +92,7 @@ Relightable3DGaussian
 ```
 
 #### Ground Points for composition
-For multi-object composition, we manually generate a ground plane with relightable 3D Gaussian representation, which can be downloaded [here](https://box.nju.edu.cn/f/c51d9de245f04d0fb872/?dl=1). We put the *ground.ply* in the folder *./point*.
+For multi-object composition, we manually generate a ground plane with relightable 3D Gaussian representation, which can be downloaded [here](https://box.nju.edu.cn/f/f31b03438e0d445f9f90/?dl=1). We put the *ground.ply* in the folder *./point*.
 
 ### Running
 We run the code in a single NVIDIA GeForce RTX 3090 GPU (24G). To reproduce the results in the paper, please run the following code.
@@ -152,7 +152,7 @@ python gui.py -m output/NeRF_Syn/lego/3dgs -t render
 # for relightable 3D Gaussian
 python gui.py -m output/NeRF_Syn/lego/neilf -t neilf
 ```
-### Trying on your own data
+### Try on your own data
 We recommend that users reorganize their own data as neilfpp-like dataset and then optimize. Modified VisMVSNet and auxiliary scripts to prepare your own data will come soon.
 
 ### Citation
