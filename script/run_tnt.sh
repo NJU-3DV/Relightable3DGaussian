@@ -5,7 +5,7 @@ list="Barn Caterpillar Family Truck"
 
 for i in $list
 do
-python train.py --eval \
+python train.py \
 -s ${root_dir}${i} \
 -m output/tnt/${i}/3dgs \
 --lambda_mask_entropy 0.1 \
@@ -15,7 +15,7 @@ python train.py --eval \
 --densification_interval 500 \
 --save_training_vis
 
-python train.py --eval \
+python train.py \
 -s ${root_dir}${i} \
 -m output/tnt/${i}/neilf \
 -c output/tnt/${i}/3dgs/chkpnt30000.pth \

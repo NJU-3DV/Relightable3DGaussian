@@ -496,11 +496,11 @@ def loadCamsFromScene(path, valid_list, white_background, debug):
 
 def readNeILFInfo(path, white_background, eval, debug=False):
     validation_indexes = []
-    if "data_dtu" in path:
-        if eval:
+    if eval:
+        if "data_dtu" in path:
             validation_indexes = [2, 12, 17, 30, 34]
-    else:
-        raise NotImplementedError
+        else:
+            raise NotImplementedError
 
     print("Reading Training transforms")
     if eval:
