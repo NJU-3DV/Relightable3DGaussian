@@ -193,11 +193,17 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, debug=False
         image, is_hdr = load_img(os.path.join(images_folder, image_name))
 
         mask_path = os.path.join(os.path.dirname(images_folder), "masks", os.path.basename(extr.name))
-        mask = 1 - np.array(Image.open(mask_path)) / 255
+        mask = np.array(Image.open(mask_path), dtype=np.float32) / 255
+
+        # add depth for COLMAP dataset
+        depth = None
+        depth_path = os.path.join(os.path.dirname(images_folder), "filtered/depths", os.path.basename(extr.name).replace(".png", ".tiff"))
+        if os.path.exists(depth_path):
+            depth = load_depth(depth_path)
+
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovX=Fovx, FovY=FovY, fx=focal_length_x, fy=focal_length_y, cx=ppx,
-                              cy=ppy, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height, hdr=is_hdr,
-                              image_mask=mask)
+                              cy=ppy, image=image, depth=depth, image_mask=mask,
+                              image_path=image_path, image_name=image_name, width=width, height=height, hdr=is_hdr)
         cam_infos.append(cam_info)
 
         if debug and idx >= 5:

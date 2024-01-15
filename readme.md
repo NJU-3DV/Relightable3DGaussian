@@ -153,7 +153,67 @@ python gui.py -m output/NeRF_Syn/lego/3dgs -t render
 python gui.py -m output/NeRF_Syn/lego/neilf -t neilf
 ```
 ### Try on your own data
-We recommend that users reorganize their own data as neilfpp-like dataset and then optimize. Modified VisMVSNet and auxiliary scripts to prepare your own data will come soon.
+We provide here a modified version of [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the MVS cues for geometry enhancement.
+```
+cd vismvsnet
+```
+(1) Run using shell
+You could change the <Path_to_data>, <img_width>, <img_height> and <src_num> according to your own data in the run_pre.sh. Note that the images and masks should be stored in *<Path_to_data>/input* and *<Path_to_data>/masks*. (Mask == 0: background, Mask==255: Object) And get the filtered MVS depth by:
+```
+sh run_pre.sh
+```
+(2) Or you colud run step by step
+**Step1**. Use COLMAP to convert a collection of un-posed images to posed ones. 
+```
+python convert.py -s <Path_to_data>
+```
+**Step2**. Convert COLMAP data to MVSNet data.
+```
+python colmap2mvsnet.py --dense_folder <Path_to_data> --max_d 256
+```
+**Step3**. Run VisMVSNet. The <img_width>, <img_height> and <src_num> should be determined based on the dataset. 
+```
+python test.py --data_root <Path_to_data> --resize "<img_width>,<img_height>" --crop "<img_width>,<img_heigh>" --num_src <num_src>
+```
+**Step4**. Run depth map filtering.
+```
+python filter.py --data <Path_to_data>/vis_mvsnet --pair <Path_to_data>/pair.txt --view 5 --vthresh 2 --pthresh '.6,.6,.6' --out_dir <Path_to_data>/filtered
+```
+
+Then, run training:
+```
+# 3DGS
+python train.py \
+-s <Path_to_data> \
+-m <Path_to_output>/3dgs \
+--lambda_mask_entropy 0.1 \
+--lambda_normal_render_depth 0.01 \
+--lambda_normal_mvs_depth 0.01 \
+--lambda_depth 1 \
+--densification_interval 500 \
+--save_training_vis
+
+# R3DG
+python train.py \
+-s <Path_to_data> \
+-m <Path_to_output>/neilf \
+-c <Path_to_output>/3dgs/chkpnt30000.pth \
+-t neilf \
+--lambda_mask_entropy 0.1 \
+--lambda_normal_render_depth 0.01 \
+--use_global_shs \
+--finetune_visibility \
+--iterations 40000 \
+--test_interval 1000 \
+--checkpoint_interval 2500 \
+--lambda_light 0.01 \
+--lambda_base_color 0.005 \
+--lambda_base_color_smooth 0.006 \
+--lambda_metallic_smooth 0.002 \
+--lambda_roughness_smooth 0.002 \
+--lambda_visibility 0.1 \
+--save_training_vis
+```
 
 ### Citation
 If you find our work useful in your research, please be so kind to cite:

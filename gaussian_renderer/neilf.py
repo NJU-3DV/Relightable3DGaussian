@@ -237,6 +237,17 @@ def calculate_loss(viewpoint_camera, pc, results, opt):
         gt_depth = viewpoint_camera.depth.cuda()
         depth_mask = (gt_depth > 0).float()
         mvs_normal = viewpoint_camera.normal.cuda()
+
+        # depth to normal, if there is a gt depth but not a MVS normal map
+        if torch.allclose(mvs_normal, torch.zeros_like(mvs_normal)):
+            from kornia.geometry import depth_to_normals
+            normal_pseudo_cam = -depth_to_normals(gt_depth[None], viewpoint_camera.intrinsics[None])[0]
+            c2w = viewpoint_camera.world_view_transform.T.inverse()
+            R = c2w[:3, :3]
+            _, H, W = normal_pseudo_cam.shape
+            mvs_normal = (R @ normal_pseudo_cam.reshape(3, -1)).reshape(3, H, W)
+            viewpoint_camera.normal = mvs_normal.cpu()
+
         loss_normal_mvs_depth = F.mse_loss(
             rendered_normal * depth_mask, mvs_normal * depth_mask)
         tb_dict["loss_normal_mvs_depth"] = loss_normal_mvs_depth.item()
