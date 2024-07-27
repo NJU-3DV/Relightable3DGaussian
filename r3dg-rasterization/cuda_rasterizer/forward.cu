@@ -277,7 +277,9 @@ renderCUDA(
 	float* __restrict__ out_color,
 	float* __restrict__ out_opacity,
 	float* __restrict__ out_depth,
-	float* __restrict__ out_feature)
+	float* __restrict__ out_feature,
+	float* __restrict__ out_weights
+	)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -369,6 +371,7 @@ renderCUDA(
             Opacity += weight;
 
 			T = test_T;
+			atomicAdd(&(out_weights[collected_id[j]]), weight);
 
 			// Keep track of last range entry to update this
 			// pixel.
@@ -503,7 +506,8 @@ void FORWARD::render(
 	float* out_color,
 	float* out_opacity,
 	float* out_depth,
-	float* out_feature
+	float* out_feature,
+	float* out_weights
 	)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
@@ -521,7 +525,8 @@ void FORWARD::render(
 		out_color,
 		out_opacity,
 		out_depth,
-		out_feature);
+		out_feature,
+		out_weights);
 }
 
 void FORWARD::preprocess(int P, int D, int M,

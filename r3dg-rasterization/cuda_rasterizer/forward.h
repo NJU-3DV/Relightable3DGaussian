@@ -64,7 +64,8 @@ namespace FORWARD
 		float* out_color,
 		float* out_opacity,
 		float* out_depth,
-		float* out_feature);
+		float* out_feature,
+		float* out_weights);
 
 	void render_xyz(
         const dim3 grid, dim3 block,

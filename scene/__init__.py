@@ -40,14 +40,22 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
-        print(os.path.join(args.source_path, "inputs/sfm_scene.json"))
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval,
                                                           debug=args.debug_cuda)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
-            print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval,
-                                                           debug=args.debug_cuda)
+            if "stanford_orb" in args.source_path:
+                print("Found keyword stanford_orb, assuming Stanford ORB data set!")
+                scene_info = sceneLoadTypeCallbacks["StanfordORB"](args.source_path, args.white_background, args.eval, 
+                                                                   debug=args.debug_cuda)
+            elif "Synthetic4Relight" in args.source_path:
+                print("Found transforms_train.json file, assuming Synthetic4Relight data set!")
+                scene_info = sceneLoadTypeCallbacks["Synthetic4Relight"](args.source_path, args.white_background, args.eval,
+                                                            debug=args.debug_cuda)
+            else:
+                print("Found transforms_train.json file, assuming Blender data set!")
+                scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, 
+                                                               debug=args.debug_cuda)
         elif os.path.exists(os.path.join(args.source_path, "inputs/sfm_scene.json")):
             print("Found sfm_scene.json file, assuming NeILF data set!")
             scene_info = sceneLoadTypeCallbacks["NeILF"](args.source_path, args.white_background, args.eval,

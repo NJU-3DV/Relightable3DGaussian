@@ -8,7 +8,8 @@ from arguments import OptimizationParams
 from scene.cameras import Camera
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
-from utils.loss_utils import ssim
+from utils.loss_utils import ssim, first_order_edge_aware_loss, second_order_edge_aware_loss, \
+    bilateral_smooth_loss, tv_loss
 from utils.image_utils import psnr
 from .r3dg_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
@@ -79,10 +80,19 @@ def render_view(camera: Camera, pc: GaussianModel, pipe, bg_color: torch.Tensor,
     else:
         colors_precomp = override_color
 
-    features = pc.get_normal
+    normals = pc.get_normal
+    
+    dir_pp = (pc.get_xyz - camera.camera_center.repeat(pc.get_shs.shape[0], 1))
+    dir_pp_normalized = F.normalize(dir_pp, dim=-1)
+    
+    xyz_homo = torch.cat([means3D, torch.ones_like(means3D[:, :1])], dim=-1)
+    depths = (xyz_homo @ camera.world_view_transform)[:, 2:3]
+    depths2 = depths.square()
+    features = torch.cat([normals, depths, depths2], dim=-1)
+    
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     (num_rendered, num_contrib, rendered_image, rendered_opacity, rendered_depth,
-     rendered_feature, rendered_pseudo_normal, rendered_surface_xyz, radii) = rasterizer(
+     rendered_feature, rendered_pseudo_normal, rendered_surface_xyz, weights, radii) = rasterizer(
         means3D=means3D,
         means2D=means2D,
         shs=shs,
@@ -93,13 +103,21 @@ def render_view(camera: Camera, pc: GaussianModel, pipe, bg_color: torch.Tensor,
         cov3D_precomp=cov3D_precomp,
         features=features,
     )
-    rendered_normal = rendered_feature
+     
+    mask = num_contrib > 0
+    rendered_feature = rendered_feature / rendered_opacity.clamp_min(1e-5) * mask
+    # rendered_depth = rendered_depth / rendered_opacity.clamp_min(1e-5) * mask
+    
+    rendered_normal, rendered_depth, rendered_depth2 = torch.split(rendered_feature, [3, 1, 1], dim=0)
+    
+    rendered_var = rendered_depth2 - rendered_depth.square()
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     results = {"render": rendered_image,
                "opacity": rendered_opacity,
                "depth": rendered_depth,
+               "depth_var": rendered_var,
                "normal": rendered_normal,
                "pseudo_normal": rendered_pseudo_normal,
                "surface_xyz": rendered_surface_xyz,
@@ -107,11 +125,15 @@ def render_view(camera: Camera, pc: GaussianModel, pipe, bg_color: torch.Tensor,
                "visibility_filter": radii > 0,
                "radii": radii,
                "num_rendered": num_rendered,
-               "num_contrib": num_contrib}
+               "num_contrib": num_contrib,
+               "opacities": opacity,
+               "normals": normals,
+               "directions": dir_pp_normalized,
+               "weights": weights}
     
     return results
 
-def calculate_loss(viewpoint_camera, pc, render_pkg, opt):
+def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     tb_dict = {
         "num_points": pc.get_xyz.shape[0],
     }
@@ -120,6 +142,7 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt):
     rendered_opacity = render_pkg["opacity"]
     rendered_depth = render_pkg["depth"]
     rendered_normal = render_pkg["normal"]
+    visibility_filter = render_pkg["visibility_filter"]
     gt_image = viewpoint_camera.original_image.cuda()
     image_mask = viewpoint_camera.image_mask.cuda()
 
@@ -129,15 +152,6 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt):
     tb_dict["psnr"] = psnr(rendered_image, gt_image).mean().item()
     tb_dict["ssim"] = ssim_val.item()
     loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_val)
-
-    if opt.lambda_depth > 0:
-        gt_depth = viewpoint_camera.depth.cuda()
-        depth_mask = gt_depth > 0
-        sur_mask = torch.logical_xor(image_mask.bool(), depth_mask)
-
-        loss_depth = F.l1_loss(rendered_depth[~sur_mask], gt_depth[~sur_mask])
-        tb_dict["loss_depth"] = loss_depth.item()
-        loss = loss + opt.lambda_depth * loss_depth
 
     if opt.lambda_mask_entropy > 0:
         o = rendered_opacity.clamp(1e-6, 1 - 1e-6)
@@ -152,33 +166,65 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt):
         tb_dict["loss_normal_render_depth"] = loss_normal_render_depth.item()
         loss = loss + opt.lambda_normal_render_depth * loss_normal_render_depth
 
-    if opt.lambda_normal_mvs_depth > 0:
-        gt_depth = viewpoint_camera.depth.cuda()
-        depth_mask = (gt_depth > 0).float()
-        mvs_normal = viewpoint_camera.normal.cuda()
+    if opt.lambda_normal_smooth > 0:
+        loss_normal_smooth = first_order_edge_aware_loss(rendered_normal, gt_image)
+        tb_dict["loss_normal_smooth"] = loss_normal_smooth.item()
+        lambda_normal_smooth = opt.lambda_normal_smooth
+        loss = loss + lambda_normal_smooth * loss_normal_smooth
+    
+    if opt.lambda_depth_smooth > 0:
+        loss_depth_smooth = first_order_edge_aware_loss(rendered_depth, gt_image)
+        tb_dict["loss_depth_smooth"] = loss_depth_smooth.item()
+        lambda_depth_smooth = opt.lambda_depth_smooth
+        loss = loss + lambda_depth_smooth * loss_depth_smooth
         
-        # depth to normal, if there is a gt depth but not a MVS normal map
-        if torch.allclose(mvs_normal, torch.zeros_like(mvs_normal)):
-            from kornia.geometry import depth_to_normals
-            normal_pseudo_cam = -depth_to_normals(gt_depth[None], viewpoint_camera.intrinsics[None])[0]
-            c2w = viewpoint_camera.world_view_transform.T.inverse()
-            R = c2w[:3, :3]
-            _, H, W = normal_pseudo_cam.shape
-            mvs_normal = (R @ normal_pseudo_cam.reshape(3, -1)).reshape(3, H, W)
-            viewpoint_camera.normal = mvs_normal.cpu()
+    if opt.lambda_point_entropy > 0:
+        ws = render_pkg["weights"]
+        vis_opacities = render_pkg["opacities"]
+        loss_point_entropy = (ws * (
+                        - vis_opacities * torch.log(vis_opacities + 1e-10)
+                        - (1 - vis_opacities) * torch.log(1 - vis_opacities + 1e-10)
+                        )).mean()
+        tb_dict["loss_normal_smooth"] = loss_point_entropy.item()
+        loss = loss + opt.lambda_point_entropy * loss_point_entropy
         
-        loss_normal_mvs_depth = F.mse_loss(
-            rendered_normal * depth_mask, mvs_normal * depth_mask)
-        tb_dict["loss_normal_mvs_depth"] = loss_normal_mvs_depth.item()
-        loss = loss + opt.lambda_normal_mvs_depth * loss_normal_mvs_depth
-
+    if opt.lambda_orientation > 0 and iteration > opt.lambda_orientation_from_iter:
+        ws = render_pkg["weights"].clamp_max(1)
+        normals = render_pkg["normals"]
+        directions = render_pkg["directions"]
+        loss_orientation = (ws * (normals * directions).sum(-1, keepdim=True).clamp_min(0.0)).mean()
+        tb_dict["loss_orientation"] = loss_orientation.item()
+        loss = loss + opt.lambda_orientation * loss_orientation
+    
+    if opt.lambda_depth_var > 0:
+        depth_var = render_pkg["depth_var"]
+        loss_depth_var = depth_var.clamp_min(1e-6).sqrt().mean()
+        tb_dict["loss_depth_var"] = loss_depth_var.item()
+        lambda_depth_var = opt.lambda_depth_var * min(math.pow(10, iteration / 5000), 100)
+        # lambda_depth_var = opt.lambda_depth_var
+        loss = loss + lambda_depth_var * loss_depth_var
+    
+    
+    if opt.lambda_surface > 0:
+        center, _ = torch.median(pc.get_xyz, dim=0)
+        loss_surface = torch.exp(-(pc.get_xyz - center[None, ...]).abs().mean())
+        
+        tb_dict["loss_surface"] = loss_surface.item()
+        loss = loss + opt.lambda_surface * loss_surface
+        
+    if opt.lambda_scaling > 0:
+        scaling = pc.get_scaling
+        scaling_loss = (scaling - scaling.mean(dim=-1, keepdim=True)).abs().sum(-1).mean()
+        lambda_scaling = opt.lambda_scaling - 0.99 * opt.lambda_scaling * min(1, 4 * iteration / opt.iterations)
+        loss = loss + lambda_scaling * scaling_loss
+    
     tb_dict["loss"] = loss.item()
     
     return loss, tb_dict
 
 def render(viewpoint_camera: Camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, 
            scaling_modifier=1.0,override_color=None, opt: OptimizationParams = None, 
-           is_training=False, dict_params=None):
+           is_training=False, dict_params=None, iteration=0):
     """
     Render the scene.
     Background tensor (bg_color) must be on GPU!
@@ -186,10 +232,8 @@ def render(viewpoint_camera: Camera, pc: GaussianModel, pipe, bg_color: torch.Te
     results = render_view(viewpoint_camera, pc, pipe, bg_color, scaling_modifier, override_color,
                           computer_pseudo_normal=True if opt is not None and opt.lambda_normal_render_depth>0 else False)
 
-    results["hdr"] = viewpoint_camera.hdr
-
     if is_training:
-        loss, tb_dict = calculate_loss(viewpoint_camera, pc, results, opt)
+        loss, tb_dict = calculate_loss(viewpoint_camera, pc, results, opt, iteration)
         results["tb_dict"] = tb_dict
         results["loss"] = loss
     

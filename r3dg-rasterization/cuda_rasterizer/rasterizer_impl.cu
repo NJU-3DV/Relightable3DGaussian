@@ -225,6 +225,7 @@ int CudaRasterizer::Rasterizer::forward(
 	float* out_feature,
 	float* out_normal,
 	float* out_surface_xyz,
+	float* out_weights,
     int* radii,
 	bool debug)
 {
@@ -344,7 +345,8 @@ int CudaRasterizer::Rasterizer::forward(
 		out_color,
         out_opacity,
 		out_depth,
-		out_feature
+		out_feature,
+		out_weights
 		), debug)
 
     if (computer_pseudo_normal){

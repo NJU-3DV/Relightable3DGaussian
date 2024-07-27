@@ -1,11 +1,9 @@
 import re
 import os
 import sys
-import glob
 import json
 import numpy as np
-from PIL import Image
-import imageio.v2 as imageio
+
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
@@ -15,14 +13,8 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 from tqdm import tqdm
-
-try:
-    import pyexr
-except Exception as e:
-    print(e)
-    # raise e
-    pyexr = None
-
+import cv2
+from scene.utils import load_img_rgb, load_mask_bool, load_depth, load_pfm
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -40,10 +32,8 @@ class CameraInfo(NamedTuple):
     cx: np.array = None
     cy: np.array = None
     normal: np.array = None
-    hdr: bool = False
     depth: np.array = None
     image_mask: np.array = None
-
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -51,80 +41,6 @@ class SceneInfo(NamedTuple):
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
-
-
-def load_img(path):
-    if not "." in os.path.basename(path):
-        files = glob.glob(path + '.*')
-        assert len(files) > 0, "Tried to find image file for: %s, but found 0 files" % (path)
-        path = files[0]
-    if path.endswith(".exr"):
-        if pyexr is not None:
-            exr_file = pyexr.open(path)
-            # print(exr_file.channels)
-            all_data = exr_file.get()
-            img = all_data[..., 0:3]
-            if "A" in exr_file.channels:
-                mask = np.clip(all_data[..., 3:4], 0, 1)
-                img = img * mask
-        else:
-            img = imageio.imread(path)
-            import pdb;
-            pdb.set_trace()
-        img = np.nan_to_num(img)
-        hdr = True
-    else:  # LDR image
-        img = imageio.imread(path)
-        img = img / 255
-        # img[..., 0:3] = srgb_to_rgb_np(img[..., 0:3])
-        hdr = False
-    return img, hdr
-
-
-def load_pfm(file: str):
-    color = None
-    width = None
-    height = None
-    scale = None
-    endian = None
-    with open(file, 'rb') as f:
-        header = f.readline().rstrip()
-        if header == b'PF':
-            color = True
-        elif header == b'Pf':
-            color = False
-        else:
-            raise Exception('Not a PFM file.')
-        dim_match = re.match(br'^(\d+)\s(\d+)\s$', f.readline())
-        if dim_match:
-            width, height = map(int, dim_match.groups())
-        else:
-            raise Exception('Malformed PFM header.')
-        scale = float(f.readline().rstrip())
-        if scale < 0:  # little-endian
-            endian = '<'
-            scale = -scale
-        else:
-            endian = '>'  # big-endian
-        data = np.fromfile(f, endian + 'f')
-        shape = (height, width, 3) if color else (height, width)
-        data = np.reshape(data, shape)
-        data = data[::-1, ...]  # cv2.flip(data, 0)
-
-    return np.ascontiguousarray(data)
-
-
-def load_depth(tiff_path):
-    return imageio.imread(tiff_path)
-
-
-def load_mask(mask_file):
-    mask = imageio.imread(mask_file, mode='L')
-    mask = mask.astype(np.float32)
-    mask[mask > 0.5] = 1.0
-
-    return mask
-
 
 def getNerfppNorm(cam_info):
     def get_center_and_diag(cam_centers):
@@ -190,20 +106,14 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, debug=False
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
-        image, is_hdr = load_img(os.path.join(images_folder, image_name))
+        image = load_img_rgb(image_path)
 
         mask_path = os.path.join(os.path.dirname(images_folder), "masks", os.path.basename(extr.name))
-        mask = np.array(Image.open(mask_path), dtype=np.float32) / 255
-
-        # add depth for COLMAP dataset
-        depth = None
-        depth_path = os.path.join(os.path.dirname(images_folder), "filtered/depths", os.path.basename(extr.name).replace(".png", ".tiff"))
-        if os.path.exists(depth_path):
-            depth = load_depth(depth_path)
-
+        mask = 1.0 - load_mask_bool(mask_path) / 255
+        image = image * mask
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovX=Fovx, FovY=FovY, fx=focal_length_x, fy=focal_length_y, cx=ppx,
-                              cy=ppy, image=image, depth=depth, image_mask=mask,
-                              image_path=image_path, image_name=image_name, width=width, height=height, hdr=is_hdr)
+                              cy=ppy, image=image, image_path=image_path, image_name=image_name, width=width, height=height,
+                              image_mask=mask)
         cam_infos.append(cam_info)
 
         if debug and idx >= 5:
@@ -330,8 +240,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             R = np.transpose(w2c[:3, :3])  # R is stored transposed due to 'glm' in CUDA code
             T = w2c[:3, 3]
 
-            image, is_hdr = load_img(image_path)
-
+            image = load_img_rgb(image_path)
             bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
 
             image_mask = np.ones_like(image[..., 0])
@@ -355,7 +264,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             fovy = focal2fov(fov2focal(fovx, image.shape[0]), image.shape[1])
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, image=image, image_mask=image_mask,
                                         image_path=image_path, depth=depth, normal=normal, image_name=image_name,
-                                        width=image.shape[1], height=image.shape[0], hdr=is_hdr))
+                                        width=image.shape[1], height=image.shape[0]))
 
             if debug and idx >= 5:
                 break
@@ -446,30 +355,11 @@ def loadCamsFromScene(path, valid_list, white_background, debug):
             image_path = os.path.join(path, image_list[index])
             image_name = Path(image_path).stem
 
-            image, is_hdr = load_img(image_path)
-
-            depth_path = os.path.join(path + "/depths/", os.path.basename(
-                image_list[index]).replace(os.path.splitext(image_list[index])[-1], ".tiff"))
-
-            if os.path.exists(depth_path):
-                depth = load_depth(depth_path)
-                depth *= bbox_inv[0, 0]
-            else:
-                print("No depth map for test view.")
-                depth = None
-
-            normal_path = os.path.join(path + "/normals/", os.path.basename(
-                image_list[index]).replace(os.path.splitext(image_list[index])[-1], ".pfm"))
-            if os.path.exists(normal_path):
-                normal = load_pfm(normal_path)
-            else:
-                print("No normal map for test view.")
-                normal = None
-
-            mask_path = os.path.join(path + "/pmasks/", os.path.basename(
-                image_list[index]).replace(os.path.splitext(image_list[index])[-1], ".png"))
+            image = load_img_rgb(image_path)
+            mask_path = os.path.join(path + "/pmasks/", os.path.basename(image_list[index]).replace(os.path.splitext(image_list[index])[-1], ".png"))
+            
             if os.path.exists(mask_path):
-                img_mask = (imageio.imread(mask_path, pilmode='L') > 0.1).astype(np.float32)
+                img_mask = load_mask_bool(mask_path)
                 # if pmask is available, mask the image for PSNR
                 image *= img_mask[..., np.newaxis]
             else:
@@ -482,18 +372,15 @@ def loadCamsFromScene(path, valid_list, white_background, debug):
                 test_cam_infos.append(CameraInfo(uid=index, R=R, T=T, FovY=fovy, FovX=fovx, fx=focal_length_x,
                                                  fy=focal_length_y, cx=ppx, cy=ppy, image=image,
                                                  image_path=image_path, image_name=image_name,
-                                                 depth=depth, image_mask=img_mask, normal=normal,
-                                                 width=image.shape[1], height=image.shape[0], hdr=is_hdr))
+                                                 image_mask=img_mask,
+                                                 width=image.shape[1], height=image.shape[0]))
             else:
                 image *= img_mask[..., np.newaxis]
-                depth *= img_mask
-                normal *= img_mask[..., np.newaxis]
-
                 train_cam_infos.append(CameraInfo(uid=index, R=R, T=T, FovY=fovy, FovX=fovx, fx=focal_length_x,
                                                   fy=focal_length_y, cx=ppx, cy=ppy, image=image,
                                                   image_path=image_path, image_name=image_name,
-                                                  depth=depth, image_mask=img_mask, normal=normal,
-                                                  width=image.shape[1], height=image.shape[0], hdr=is_hdr))
+                                                  image_mask=img_mask,
+                                                  width=image.shape[1], height=image.shape[0]))
         if debug and i >= 5:
             break
 
@@ -502,11 +389,12 @@ def loadCamsFromScene(path, valid_list, white_background, debug):
 
 def readNeILFInfo(path, white_background, eval, debug=False):
     validation_indexes = []
-    if eval:
-        if "data_dtu" in path:
+    # if "data_dtu" in path:
+    if True:
+        if eval:
             validation_indexes = [2, 12, 17, 30, 34]
-        else:
-            raise NotImplementedError
+    else:
+        raise NotImplementedError
 
     print("Reading Training transforms")
     if eval:
@@ -518,18 +406,18 @@ def readNeILFInfo(path, white_background, eval, debug=False):
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
     ply_path = f'{path}/inputs/model/sparse_bbx_scale.ply'
-    if not os.path.exists(ply_path):
-        org_ply_path = f'{path}/inputs/model/sparse.ply'
+    # if not os.path.exists(ply_path):
+    org_ply_path = f'{path}/inputs/model/sparse.ply'
 
-        # scale sparse.ply
-        pcd = fetchPly(org_ply_path)
-        inv_scale_mat = np.linalg.inv(bbx_trans)  # [4, 4]
-        points = pcd.points
-        xyz = (np.concatenate([points, np.ones_like(points[:, :1])], axis=-1) @ inv_scale_mat.T)[:, :3]
-        normals = pcd.normals
-        colors = pcd.colors
+    # scale sparse.ply
+    pcd = fetchPly(org_ply_path)
+    inv_scale_mat = np.linalg.inv(bbx_trans)  # [4, 4]
+    points = pcd.points
+    xyz = (np.concatenate([points, np.ones_like(points[:, :1])], axis=-1) @ inv_scale_mat.T)[:, :3]
+    normals = pcd.normals
+    colors = pcd.colors
 
-        storePly(ply_path, xyz, colors * 255, normals)
+    storePly(ply_path, xyz, colors * 255, normals)
 
     try:
         pcd = fetchPly(ply_path)
@@ -543,9 +431,182 @@ def readNeILFInfo(path, white_background, eval, debug=False):
                            ply_path=ply_path)
     return scene_info
 
+def readCamerasFromTransforms2(path, transformsfile, white_background, 
+                               extension=".png", benchmark_size = 512, debug=False):
+    cam_infos = []
+    
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+        fovx = contents["camera_angle_x"]
+
+        frames = contents["frames"]
+        for idx, frame in enumerate(tqdm(frames, leave=False)):
+            if os.path.exists(os.path.join(path, frame["file_path"] + '.png')):
+                image_path = os.path.join(path, frame["file_path"] + '.png')
+            else:
+                image_path = os.path.join(path, frame["file_path"] + '.exr')
+                
+            mask_item = frame["file_path"].replace("test", "test_mask").replace("train", "train_mask")
+            if os.path.exists(os.path.join(path, mask_item + '.png')):
+                mask_path = os.path.join(path, mask_item + '.png')
+            else:
+                mask_path = os.path.join(path, mask_item + '.exr')
+            
+            image_name = Path(image_path).stem
+
+            c2w = np.array(frame["transform_matrix"])
+            c2w[:3, 1:3] *= -1
+
+            w2c = np.linalg.inv(c2w)
+            R = np.transpose(w2c[:3, :3])
+            T = w2c[:3, 3]
+
+            image = load_img_rgb(image_path)
+            mask = load_mask_bool(mask_path).astype(np.float32)
+            image = cv2.resize(image, (benchmark_size, benchmark_size), interpolation=cv2.INTER_AREA)
+            mask = cv2.resize(mask, (benchmark_size, benchmark_size), interpolation=cv2.INTER_AREA)
+
+            bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
+            image = image * mask[..., None] + bg * (1 - mask[..., None])
+
+            fovy = focal2fov(fov2focal(fovx, image.shape[0]), image.shape[1])
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, image=image, image_mask=mask,
+                                        image_path=image_path, depth=None, normal=None, image_name=image_name,
+                                        width=image.shape[1], height=image.shape[0]))
+
+            if debug and idx >= 5:
+                break
+
+    return cam_infos
+
+
+def readStanfordORBInfo(path, white_background, eval, extension=".exr", benchmark_size = 512, debug=False):
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromTransforms2(path, "transforms_train.json", white_background, 
+                                                 extension, benchmark_size, debug=debug)
+    if eval:
+        print("Reading Test Transforms")
+        test_cam_infos = readCamerasFromTransforms2(path, "transforms_test.json", white_background, 
+                                                    extension, benchmark_size, debug=debug)
+    else:
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if os.path.exists(ply_path):
+        os.remove(ply_path)
+        
+    # Since this data set has no colmap data, we start with random points
+    num_pts = 100_000
+    print(f"Generating random point cloud ({num_pts})...")
+
+    # We create random points inside the bounds of the synthetic Blender scenes
+    xyz = np.random.random((num_pts, 3)) * 1 - 0.5
+    # print(np.min(xyz), np.max(xyz))
+    shs = np.random.random((num_pts, 3)) / 255.0
+    normals = np.random.randn(*xyz.shape)
+    normals /= np.linalg.norm(normals, axis=-1, keepdims=True)
+
+    storePly(ply_path, xyz, SH2RGB(shs) * 255, normals)
+
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+
+    return scene_info
+
+def readCamerasFromTransforms3(path, transformsfile, white_background, extension=".png", debug=False):
+    cam_infos = []
+
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+        fovx = contents["camera_angle_x"]
+
+        frames = contents["frames"]
+        for idx, frame in enumerate(tqdm(frames, leave=False)):
+            image_path = os.path.join(path, frame["file_path"] + extension)
+            mask_path = image_path.replace("_rgb.exr", "_mask.png")
+            image_name = Path(image_path).stem
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            c2w = np.array(frame["transform_matrix"])
+            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+            c2w[:3, 1:3] *= -1
+
+            # get the world-to-camera transform and set R, T
+            w2c = np.linalg.inv(c2w)
+            R = np.transpose(w2c[:3, :3])  # R is stored transposed due to 'glm' in CUDA code
+            T = w2c[:3, 3]
+
+            bg = 1 if white_background else 0
+            
+            image = load_img_rgb(image_path)
+            mask = load_mask_bool(mask_path).astype(np.float32)
+
+            bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
+            image = image[..., :3] * mask[..., None] + bg * (1 - mask[..., None])
+
+            fovy = focal2fov(fov2focal(fovx, image.shape[0]), image.shape[1])
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=fovy, FovX=fovx, image=image, image_mask=mask,
+                                        image_path=image_path, image_name=image_name,
+                                        width=image.shape[1], height=image.shape[0]))
+
+            if debug and idx >= 5:
+                break
+
+    return cam_infos
+
+
+def readSynthetic4RelightInfo(path, white_background, eval, debug=False):
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromTransforms3(path, "transforms_train.json", white_background, "_rgb.exr", debug=debug)
+    if eval:
+        print("Reading Test Transforms")
+        test_cam_infos = readCamerasFromTransforms3(path, "transforms_test.json", white_background, "_rgba.png", debug=debug)
+    else:
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        normals = np.random.randn(*xyz.shape)
+        normals /= np.linalg.norm(normals, axis=-1, keepdims=True)
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255, normals)
+
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+
+    return scene_info
 
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender": readNerfSyntheticInfo,
+    "Synthetic4Relight": readSynthetic4RelightInfo,
     "NeILF": readNeILFInfo,
+    "StanfordORB": readStanfordORBInfo,
 }

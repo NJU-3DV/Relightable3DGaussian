@@ -1,8 +1,12 @@
-import cv2
+
 import torch
+import torch.nn.functional as F
 import numpy as np
 import nvdiffrast.torch as dr
-
+import imageio
+import pyexr
+from utils.graphics_utils import srgb_to_rgb
+imageio.plugins.freeimage.download()
 
 class EnvLight(torch.nn.Module):
     def __init__(self, path=None, scale=1.0):
@@ -16,20 +20,19 @@ class EnvLight(torch.nn.Module):
 
     @staticmethod
     def load(envmap_path, scale, device):
-        # load latlong env map from file
-        image = cv2.imread(envmap_path, cv2.IMREAD_UNCHANGED)
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-        if image.dtype != np.float32:
-            image = image.astype(np.float32) / 255
+        if not envmap_path.endswith(".exr"):
+            image = srgb_to_rgb(imageio.imread(envmap_path)[:, :, :3] / 255)
+        else:
+            # load latlong env map from file
+            image = pyexr.open(envmap_path).get()[:, :, :3]
 
         image = image * scale
+
         env_map_torch = torch.tensor(image, dtype=torch.float32, device=device, requires_grad=False)
 
         return env_map_torch
 
     def direct_light(self, dirs, transform=None):
-        """infer light from env_map directly"""
         shape = dirs.shape
         dirs = dirs.reshape(-1, 3)
 
@@ -38,11 +41,13 @@ class EnvLight(torch.nn.Module):
         elif self.transform is not None:
             dirs = dirs @ self.transform.T
 
-        v = dirs @ self.to_opengl.T
-        tu = torch.atan2(v[..., 0:1], -v[..., 2:3]) / (2 * np.pi) + 0.5
-        tv = torch.acos(torch.clamp(v[..., 1:2], min=-1, max=1)) / np.pi
-        texcoord = torch.cat((tu, tv), dim=-1)
-
-        light = dr.texture(self.envmap[None, ...], texcoord[None, None, ...], filter_mode='linear')[0, 0]
-
-        return light.reshape(*shape)
+        envir_map =  self.envmap.permute(2, 0, 1).unsqueeze(0) # [1, 3, H, W]
+        phi = torch.arccos(dirs[:, 2]).reshape(-1) - 1e-6
+        theta = torch.atan2(dirs[:, 1], dirs[:, 0]).reshape(-1)
+        # normalize to [-1, 1]
+        query_y = (phi / np.pi) * 2 - 1
+        query_x = - theta / np.pi
+        grid = torch.stack((query_x, query_y)).permute(1, 0).unsqueeze(0).unsqueeze(0)
+        light_rgbs = F.grid_sample(envir_map, grid, align_corners=True).squeeze().permute(1, 0).reshape(-1, 3)
+    
+        return light_rgbs.reshape(*shape)

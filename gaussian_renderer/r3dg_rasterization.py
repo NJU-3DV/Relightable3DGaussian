@@ -20,7 +20,6 @@ except Exception as e:
             os.path.join(parent_dir, "cuda_rasterizer/forward.cu"),
             os.path.join(parent_dir, "cuda_rasterizer/backward.cu"),
             os.path.join(parent_dir, "rasterize_points.cu"),
-            os.path.join(parent_dir, "render_equation.cu"),
             os.path.join(parent_dir, "ext.cpp")],
         verbose=True)
 
@@ -103,26 +102,26 @@ class _RasterizeGaussians(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args)  # Copy them before they can be corrupted
             try:
-                num_rendered, num_contrib, color, opacity, depth, feature, normal, surface_xyz, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(
+                num_rendered, num_contrib, color, opacity, depth, feature, normal, surface_xyz, weights, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(
                     *args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, num_contrib, color, opacity, depth, feature, normal, surface_xyz, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(
+            num_rendered, num_contrib, color, opacity, depth, feature, normal, surface_xyz, weights, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(
                 *args)
-
+        
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.save_for_backward(colors_precomp, means3D, features, scales, rotations, cov3Ds_precomp,
                               radii, sh, geomBuffer, binningBuffer, imgBuffer)
-        return num_rendered, num_contrib, color, opacity, depth, feature, normal, surface_xyz, radii
+        return num_rendered, num_contrib, color, opacity, depth, feature, normal, surface_xyz, weights, radii
 
     @staticmethod
     def backward(ctx, grad_num_rendered, grad_num_contrib, grad_out_color, grad_out_opacity, grad_out_depth,
-                 grad_out_feature, grad_out_normal, grad_out_surface_xyz, grad_out_radii):
+                 grad_out_feature, grad_out_normal, grad_out_surface_xyz, grad_out_weights, grad_out_radii):
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
@@ -261,64 +260,3 @@ class GaussianRasterizer(nn.Module):
             cov3D_precomp,
             raster_settings,
         )
-
-
-class _RenderEquation(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, base_color, roughness, metallic, normals,
-                viewdirs, incidents_shs, direct_shs, visibility_shs,
-                sample_num, is_training, debug=False):
-        pbr, incident_dirs, diffuse_light = _C.render_equation_forward(
-            base_color, roughness, metallic, normals,
-            viewdirs, incidents_shs, direct_shs, visibility_shs,
-            sample_num, is_training, debug)
-
-        ctx.sample_num = sample_num
-        ctx.debug = debug
-        ctx.save_for_backward(base_color, roughness, metallic, normals,
-                              viewdirs, incidents_shs, direct_shs, visibility_shs, incident_dirs)
-        return pbr, incident_dirs, diffuse_light
-
-    @staticmethod
-    def backward(ctx, grad_pbr, grad_incident_dirs, grad_diffuse_light):
-        base_color, roughness, metallic, normals, \
-            viewdirs, incidents_shs, direct_shs, visibility_shs, incident_dirs = ctx.saved_tensors
-        debug = ctx.debug
-        sample_num = ctx.sample_num
-
-        (dL_dbase_color, dL_droughness, dL_dmetallic, dL_dnormals, dL_dviewdirs,
-         dL_dincidents_shs, dL_ddirect_shs, dL_dvisibility_shs) = _C.render_equation_backward(
-            base_color, roughness, metallic, normals,
-            viewdirs, incidents_shs, direct_shs,
-            visibility_shs, sample_num, incident_dirs, grad_pbr, grad_diffuse_light, debug)
-        grads = (
-            dL_dbase_color,
-            dL_droughness,
-            dL_dmetallic,
-            dL_dnormals,
-            dL_dviewdirs,
-            dL_dincidents_shs,
-            dL_ddirect_shs,
-            dL_dvisibility_shs,
-            None,
-            None,
-            None,
-        )
-        return grads
-
-
-def RenderEquation_complex(base_color, roughness, metallic, normals,
-                   viewdirs, incidents_shs, direct_shs, visibility_shs,
-                   sample_num):
-    return _C.render_equation_forward_complex(
-        base_color, roughness, metallic, normals,
-        viewdirs, incidents_shs, direct_shs, visibility_shs,
-        sample_num)
-
-def RenderEquation(base_color, roughness, metallic, normals,
-                   viewdirs, incidents_shs, direct_shs, visibility_shs,
-                   sample_num, is_training, debug=False):
-    return _RenderEquation.apply(
-            base_color, roughness, metallic, normals,
-            viewdirs, incidents_shs, direct_shs, visibility_shs,
-            sample_num, is_training, debug)

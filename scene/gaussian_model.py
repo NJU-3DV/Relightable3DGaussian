@@ -14,7 +14,18 @@ from simple_knn._C import distCUDA2
 from arguments import OptimizationParams
 from tqdm import tqdm
 from bvh import RayTracer
+from utils.graphics_utils import fibonacci_sphere_sampling
 
+
+def sample_incident_rays(normals, is_training=False, sample_num=24):
+    if is_training:
+        incident_dirs, incident_areas = fibonacci_sphere_sampling(
+            normals, sample_num, random_rotate=True)
+    else:
+        incident_dirs, incident_areas = fibonacci_sphere_sampling(
+            normals, sample_num, random_rotate=False)
+
+    return incident_dirs, incident_areas  # [N, S, 3], [N, S, 1]
 
 class GaussianModel:
 
@@ -37,14 +48,14 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
         if self.use_pbr:
-            self.base_color_activation = torch.sigmoid
-            self.roughness_activation = torch.sigmoid
-            self.metallic_activation = torch.sigmoid
+            self.base_color_activation = lambda x: torch.sigmoid(x) * 0.77 + 0.03
+            self.roughness_activation = lambda x: torch.sigmoid(x) * 0.9 + 0.09
+            self.inverse_roughness_activation = lambda y: inverse_sigmoid((y-0.09) / 0.9)
 
     def __init__(self, sh_degree: int, render_type='render'):
         self.render_type = render_type
         self.use_pbr = render_type in ['neilf']
-        self.active_sh_degree = 0
+        self.active_sh_degree = 3
         self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
         self._normal = torch.empty(0)  # normal
@@ -53,7 +64,9 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        self._visibility_tracing = None
         self.max_radii2D = torch.empty(0)
+        self.weights_accum = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.normal_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -66,17 +79,16 @@ class GaussianModel:
         if self.use_pbr:
             self._base_color = torch.empty(0)
             self._roughness = torch.empty(0)
-            self._metallic = torch.empty(0)
             self._incidents_dc = torch.empty(0)
             self._incidents_rest = torch.empty(0)
             self._visibility_dc = torch.empty(0)
             self._visibility_rest = torch.empty(0)
+        self.base_color_scale = torch.ones(3, dtype=torch.float, device="cuda")
 
     @torch.no_grad()
     def set_transform(self, rotation=None, center=None, scale=None, offset=None, transform=None):
         if transform is not None:
             scale = transform[:3, :3].norm(dim=-1)
-
             self._scaling.data = self.scaling_inverse_activation(self.get_scaling * scale)
             xyz_homo = torch.cat([self._xyz.data, torch.ones_like(self._xyz[:, :1])], dim=-1)
             self._xyz.data = (xyz_homo @ transform.T)[:, :3]
@@ -110,6 +122,7 @@ class GaussianModel:
             self._rotation,
             self._opacity,
             self.max_radii2D,
+            self.weights_accum,
             self.xyz_gradient_accum,
             self.normal_gradient_accum,
             self.denom,
@@ -120,7 +133,6 @@ class GaussianModel:
             captured_list.extend([
                 self._base_color,
                 self._roughness,
-                self._metallic,
                 self._incidents_dc,
                 self._incidents_rest,
                 self._visibility_dc,
@@ -140,22 +152,23 @@ class GaussianModel:
          self._rotation,
          self._opacity,
          self.max_radii2D,
+         weights_accum,
          xyz_gradient_accum,
          normal_gradient_accum,
          denom,
          opt_dict,
-         self.spatial_lr_scale) = model_args[:14]
-        if len(model_args) > 14 and self.use_pbr:
+         self.spatial_lr_scale) = model_args[:15]
+        if len(model_args) > 15 and self.use_pbr:
             (self._base_color,
              self._roughness,
-             self._metallic,
              self._incidents_dc,
              self._incidents_rest,
              self._visibility_dc,
-             self._visibility_rest) = model_args[14:]
+             self._visibility_rest) = model_args[15:]
 
         if is_training:
             self.training_setup(training_args)
+            self.weights_accum = weights_accum
             self.xyz_gradient_accum = xyz_gradient_accum
             self.normal_gradient_accum = normal_gradient_accum
             self.denom = denom
@@ -209,19 +222,15 @@ class GaussianModel:
 
     @property
     def get_base_color(self):
-        return self.base_color_activation(self._base_color)
+        return self.base_color_activation(self._base_color) * self.base_color_scale[None, :]
 
     @property
     def get_roughness(self):
         return self.roughness_activation(self._roughness)
 
     @property
-    def get_metallic(self):
-        return self.metallic_activation(self._metallic)
-
-    @property
     def get_brdf(self):
-        return torch.cat([self.get_base_color, self.get_roughness, self.get_metallic], dim=-1)
+        return torch.cat([self.get_base_color, self.get_roughness], dim=-1)
 
     def get_by_names(self, names):
         if len(names) == 0:
@@ -258,7 +267,7 @@ class GaussianModel:
     def attribute_names(self):
         attribute_names = ['xyz', 'normal', 'shs_dc', 'shs_rest', 'scaling', 'rotation', 'opacity']
         if self.use_pbr:
-            attribute_names.extend(['base_color', 'roughness', 'metallic',
+            attribute_names.extend(['base_color', 'roughness',
                                     'incidents_dc', 'incidents_rest',
                                     'visibility_dc', 'visibility_rest'])
         return attribute_names
@@ -282,6 +291,7 @@ class GaussianModel:
         rays_o = means3D
         for iteration in tbar:
             rays_d = torch.randn_like(rays_o)
+            rays_d = F.normalize(rays_d, dim=-1)
             mask = (rays_d * normal).sum(-1) < 0
             rays_d[mask] *= -1
             sample_sh2vis = eval_sh(vis_sh_degree, visibility_shs_view, rays_d)
@@ -298,6 +308,38 @@ class GaussianModel:
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
+    
+    @torch.no_grad()
+    def update_visibility(self, sample_num):
+        raytracer = RayTracer(self.get_xyz, self.get_scaling, self.get_rotation)
+        gaussians_xyz = self.get_xyz
+        gaussians_inverse_covariance = self.get_inverse_covariance()
+        gaussians_opacity = self.get_opacity[:, 0]
+        gaussians_normal = self.get_normal
+        incident_visibility_results = []
+        incident_dirs_results = []
+        incident_areas_results = []
+        chunk_size = gaussians_xyz.shape[0] // ((sample_num - 1) // 24 + 1)
+        for offset in tqdm(range(0, gaussians_xyz.shape[0], chunk_size), "Update visibility with raytracing."):
+            incident_dirs, incident_areas = sample_incident_rays(gaussians_normal[offset:offset + chunk_size], False,
+                                                    sample_num)
+            trace_results = raytracer.trace_visibility(
+                gaussians_xyz[offset:offset + chunk_size, None].expand_as(incident_dirs),
+                incident_dirs,
+                gaussians_xyz,
+                gaussians_inverse_covariance,
+                gaussians_opacity,
+                gaussians_normal)
+            incident_visibility = trace_results["visibility"]
+            incident_visibility_results.append(incident_visibility)
+            incident_dirs_results.append(incident_dirs)
+            incident_areas_results.append(incident_areas)
+        incident_visibility_result = torch.cat(incident_visibility_results, dim=0)
+        incident_dirs_result = torch.cat(incident_dirs_results, dim=0)
+        incident_areas_result = torch.cat(incident_areas_results, dim=0)
+        self._visibility_tracing = incident_visibility_result
+        self._incident_dirs = incident_dirs_result
+        self._incident_areas = incident_areas_result
 
     @classmethod
     def create_from_gaussians(cls, gaussians_list, dataset):
@@ -325,29 +367,30 @@ class GaussianModel:
          self._rotation,
          self._opacity,
          self.max_radii2D,
+         weights_accum,
          xyz_gradient_accum,
          normal_gradient_accum,
          denom,
          opt_dict,
-         self.spatial_lr_scale) = model_args[:14]
+         self.spatial_lr_scale) = model_args[:15]
 
-        self.xyz_gradient_accum = xyz_gradient_accum
+        self.weights_accum = weights_accum
         self.normal_gradient_accum = normal_gradient_accum
         self.denom = denom
 
         if self.use_pbr:
-            if len(model_args) > 14:
+            if len(model_args) > 15:
                 (self._base_color,
                  self._roughness,
-                 self._metallic,
                  self._incidents_dc,
                  self._incidents_rest,
                  self._visibility_dc,
-                 self._visibility_rest) = model_args[14:]
+                 self._visibility_rest) = model_args[15:]
             else:
                 self._base_color = nn.Parameter(torch.zeros_like(self._xyz).requires_grad_(True))
-                self._roughness = nn.Parameter(torch.zeros_like(self._xyz[..., :1]).requires_grad_(True))
-                self._metallic = nn.Parameter(torch.zeros_like(self._xyz[..., :1]).requires_grad_(True))
+                roughness = torch.zeros_like(self._xyz[..., :1])
+                # roughness = self.inverse_roughness_activation(torch.full((self._xyz.shape[0], 1), 0.9, dtype=torch.float, device="cuda"))
+                self._roughness = nn.Parameter(roughness.requires_grad_(True))
                 incidents = torch.zeros((self._xyz.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
 
                 self._incidents_dc = nn.Parameter(
@@ -400,11 +443,9 @@ class GaussianModel:
         if self.use_pbr:
             base_color = torch.zeros_like(fused_point_cloud)
             roughness = torch.zeros((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
-            metallic = torch.zeros((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda")
 
             self._base_color = nn.Parameter(base_color.requires_grad_(True))
             self._roughness = nn.Parameter(roughness.requires_grad_(True))
-            self._metallic = nn.Parameter(metallic.requires_grad_(True))
 
             incidents = torch.zeros((self._xyz.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
             self._incidents_dc = nn.Parameter(incidents[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -416,6 +457,7 @@ class GaussianModel:
 
     def training_setup(self, training_args: OptimizationParams):
         self.percent_dense = training_args.percent_dense
+        self.weights_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.normal_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -439,7 +481,6 @@ class GaussianModel:
             l.extend([
                 {'params': [self._base_color], 'lr': training_args.base_color_lr, "name": "base_color"},
                 {'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"},
-                {'params': [self._metallic], 'lr': training_args.metallic_lr, "name": "metallic"},
                 {'params': [self._incidents_dc], 'lr': training_args.light_lr, "name": "incidents_dc"},
                 {'params': [self._incidents_rest], 'lr': training_args.light_rest_lr, "name": "incidents_rest"},
                 {'params': [self._visibility_dc], 'lr': training_args.visibility_lr, "name": "visibility_dc"},
@@ -479,7 +520,6 @@ class GaussianModel:
             for i in range(self._base_color.shape[1]):
                 l.append('base_color_{}'.format(i))
             l.append('roughness')
-            l.append('metallic')
             for i in range(self._incidents_dc.shape[1] * self._incidents_dc.shape[2]):
                 l.append('incidents_dc_{}'.format(i))
             for i in range(self._incidents_rest.shape[1] * self._incidents_rest.shape[2]):
@@ -506,7 +546,6 @@ class GaussianModel:
             attributes_list.extend([
                 self._base_color.detach().cpu().numpy(),
                 self._roughness.detach().cpu().numpy(),
-                self._metallic.detach().cpu().numpy(),
                 self._incidents_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy(),
                 self._incidents_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy(),
                 self._visibility_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy(),
@@ -583,13 +622,11 @@ class GaussianModel:
                 base_color[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
             roughness = np.asarray(plydata.elements[0]["roughness"])[..., np.newaxis]
-            metallic = np.asarray(plydata.elements[0]["metallic"])[..., np.newaxis]
 
             self._base_color = nn.Parameter(
                 torch.tensor(base_color, dtype=torch.float, device="cuda").requires_grad_(True))
             self._roughness = nn.Parameter(
                 torch.tensor(roughness, dtype=torch.float, device="cuda").requires_grad_(True))
-            self._metallic = nn.Parameter(torch.tensor(metallic, dtype=torch.float, device="cuda").requires_grad_(True))
 
             incidents_dc = np.zeros((xyz.shape[0], 3, 1))
             incidents_dc[:, 0, 0] = np.asarray(plydata.elements[0]["incidents_dc_0"])
@@ -672,6 +709,7 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
+        self.weights_accum = self.weights_accum[valid_points_mask]
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.normal_gradient_accum = self.normal_gradient_accum[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
@@ -680,7 +718,6 @@ class GaussianModel:
         if self.use_pbr:
             self._base_color = optimizable_tensors["base_color"]
             self._roughness = optimizable_tensors["roughness"]
-            self._metallic = optimizable_tensors["metallic"]
             self._incidents_dc = optimizable_tensors["incidents_dc"]
             self._incidents_rest = optimizable_tensors["incidents_rest"]
             self._visibility_dc = optimizable_tensors["visibility_dc"]
@@ -714,7 +751,7 @@ class GaussianModel:
 
     def densification_postfix(self, new_xyz, new_normal, new_shs_dc, new_shs_rest, new_opacities, new_scaling,
                               new_rotation, new_base_color=None, new_roughness=None,
-                              new_metallic=None, new_incidents_dc=None, new_incidents_rest=None,
+                              new_incidents_dc=None, new_incidents_rest=None,
                               new_visibility_dc=None, new_visibility_rest=None):
         d = {"xyz": new_xyz,
              "normal": new_normal,
@@ -728,7 +765,6 @@ class GaussianModel:
             d.update({
                 "base_color": new_base_color,
                 "roughness": new_roughness,
-                "metallic": new_metallic,
                 "incidents_dc": new_incidents_dc,
                 "incidents_rest": new_incidents_rest,
                 "visibility_dc": new_visibility_dc,
@@ -745,6 +781,7 @@ class GaussianModel:
         self._shs_dc = optimizable_tensors["f_dc"]
         self._shs_rest = optimizable_tensors["f_rest"]
 
+        self.weights_accum = torch.cat([self.weights_accum, torch.ones((new_xyz.shape[0], 1), device="cuda")], dim=0)
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.normal_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -753,7 +790,6 @@ class GaussianModel:
         if self.use_pbr:
             self._base_color = optimizable_tensors["base_color"]
             self._roughness = optimizable_tensors["roughness"]
-            self._metallic = optimizable_tensors["metallic"]
             self._incidents_dc = optimizable_tensors["incidents_dc"]
             self._incidents_rest = optimizable_tensors["incidents_rest"]
             self._visibility_dc = optimizable_tensors["visibility_dc"]
@@ -768,7 +804,7 @@ class GaussianModel:
         padded_grad_normal[:grads_normal.shape[0]] = grads_normal.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask_normal = torch.where(padded_grad_normal >= grad_normal_threshold, True, False)
-        # print("densify_and_split_normal:", selected_pts_mask_normal.sum().item(), "/", self.get_xyz.shape[0])
+        print("densify_and_split_normal:", selected_pts_mask_normal.sum().item(), "/", self.get_xyz.shape[0])
 
         selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask_normal)
         selected_pts_mask = torch.logical_and(
@@ -792,7 +828,6 @@ class GaussianModel:
         if self.use_pbr:
             new_base_color = self._base_color[selected_pts_mask].repeat(N, 1)
             new_roughness = self._roughness[selected_pts_mask].repeat(N, 1)
-            new_metallic = self._metallic[selected_pts_mask].repeat(N, 1)
             new_incidents_dc = self._incidents_dc[selected_pts_mask].repeat(N, 1, 1)
             new_incidents_rest = self._incidents_rest[selected_pts_mask].repeat(N, 1, 1)
             new_visibility_dc = self._visibility_dc[selected_pts_mask].repeat(N, 1, 1)
@@ -800,7 +835,6 @@ class GaussianModel:
             args.extend([
                 new_base_color,
                 new_roughness,
-                new_metallic,
                 new_incidents_dc,
                 new_incidents_rest,
                 new_visibility_dc,
@@ -837,7 +871,6 @@ class GaussianModel:
         if self.use_pbr:
             new_base_color = self._base_color[selected_pts_mask]
             new_roughness = self._roughness[selected_pts_mask]
-            new_metallic = self._metallic[selected_pts_mask]
             new_incidents_dc = self._incidents_dc[selected_pts_mask]
             new_incidents_rest = self._incidents_rest[selected_pts_mask]
             new_visibility_dc = self._visibility_dc[selected_pts_mask]
@@ -846,7 +879,6 @@ class GaussianModel:
             args.extend([
                 new_base_color,
                 new_roughness,
-                new_metallic,
                 new_incidents_dc,
                 new_incidents_rest,
                 new_visibility_dc,
@@ -855,7 +887,7 @@ class GaussianModel:
 
         self.densification_postfix(*args)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_normal):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_normal, weights_threshold=1e-4):
         # print(self.xyz_gradient_accum.shape)
         grads = self.xyz_gradient_accum / self.denom
         grads_normal = self.normal_gradient_accum / self.denom
@@ -868,30 +900,38 @@ class GaussianModel:
         # self.densify_and_compact()
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        weight_mask = self.weights_accum[:, 0] < weights_threshold
+        prune_mask = torch.logical_or(weight_mask, prune_mask)
+        print("weights_accum:", weight_mask.sum().item(), "/", self.get_xyz.shape[0])
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 
         self.prune_points(prune_mask)
+        self.weights_accum.data[:] = 0.0
 
         torch.cuda.empty_cache()
 
-    def prune(self, min_opacity, extent, max_screen_size):
+    def prune(self, min_opacity, extent, max_screen_size, weights_threshold=1e-4):
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        weight_mask = self.weights_accum[:, 0] < weights_threshold
+        prune_mask = torch.logical_or(weight_mask, prune_mask)
+        print("weights_accum:", weight_mask.sum().item(), "/", self.get_xyz.shape[0])
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 
         self.prune_points(prune_mask)
+        self.weights_accum.data[:] = 0.0
 
         torch.cuda.empty_cache()
 
-    def add_densification_stats(self, viewspace_point_tensor, update_filter):
+    def add_densification_stats(self, viewspace_point_tensor, update_filter, weights):
+        self.weights_accum += weights
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1,
                                                              keepdim=True)
         self.normal_gradient_accum[update_filter] += torch.norm(
-            self.normal_activation(self._normal.grad)[update_filter], dim=-1,
-            keepdim=True)
+            self._normal.grad[update_filter], dim=-1, keepdim=True)
         self.denom[update_filter] += 1

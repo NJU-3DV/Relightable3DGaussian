@@ -1,6 +1,6 @@
-# Relightable 3D Gaussian: Real-time Point Cloud Relighting with BRDF Decomposition and Ray Tracing
+# Relightable 3D Gaussian: Real-time Point Cloud Relighting with BRDF Decomposition and Ray Tracing (ECCV2024)
 
-### <p align="center">[🌐Project Page](https://nju-3dv.github.io/projects/Relightable3DGaussian/) | [🖨️ArXiv](https://arxiv.org/abs/2311.16043) | [📰Paper](https://arxiv.org/abs/2311.16043)</p>
+### <p align="center">[🌐Project Page](https://nju-3dv.github.io/projects/Relightable3DGaussian/) | [🖨️ArXiv](https://arxiv.org/abs/2311.16043) | [📰Paper](https://arxiv.org/pdf/2311.16043)</p>
 
 
 <p align="center">
@@ -54,10 +54,14 @@ pip install ./r3dg-rasterization
 Download the NeRF synthetic dataset from [LINK](https://drive.google.com/drive/folders/1JDdLGDruGNXWnM1eqY1FNL9PlStjaKWi?usp=drive_link) provided by [NeRF](https://github.com/bmild/nerf).
 
 #### Pre-processed DTU
-For real-world DTU data, we follow the [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the depth maps and then filter the depth map through photometric and geometric check. We then convert the depth map to normal through [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html). And we get perfect masks from [IDR](https://github.com/lioryariv/idr). The pre-processed DTU data can be downloaded [here](https://box.nju.edu.cn/f/d9858b670ab9480fb526/?dl=1).  
+For real-world DTU data, we follow the [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the depth maps and then filter the depth map through photometric and geometric check. We then convert the depth map to normal through [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html). And we get perfect masks from [IDR](https://github.com/lioryariv/idr). The pre-process DTU data can be downloaded [here](https://box.nju.edu.cn/f/987c7bcd7bb94cd1876d/?dl=1).  
 
 #### Pre-processed Tanks and Temples
-For real-world Tanks and Temples data, we also use [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) and [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html) to get the filtered MVS depth maps and normal maps. The masks are from [NSVF](https://github.com/facebookresearch/NSVF). The pre-processed Tanks and Temples data can be downloaded [here](https://box.nju.edu.cn/f/f0b094cc22bf4934a000/?dl=1).  
+For real-world Tanks and Temples data, we also use [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) and [kornia](https://kornia.readthedocs.io/en/latest/geometry.depth.html) to get the filtered MVS depth maps and normal maps. The masks are from [NSVF](https://github.com/facebookresearch/NSVF). The pre-process Tanks and Temples data can be downloaded [here](https://box.nju.edu.cn/f/73769e8bfa834889894b/?dl=1).  
+
+#### Synthetic4Relight
+
+Download the NeRF synthetic dataset from [LINK](https://drive.google.com/file/d/1wWWu7EaOxtVq8QNalgs6kDqsiAm7xsRh/view?usp=sharing) provided by [InvRender](https://github.com/zju3dv/InvRender).
 
 #### Data Structure
 We organize the datasets like this:
@@ -88,11 +92,14 @@ Relightable3DGaussian
     |   |   |   |   |── pmasks
     |   |   |   |   |── sfm_scene.json
     │   │   │── ...
+    ├── Synthetic4Relight
+    |   ├── air_baloons
+    |   ├── ...
     
 ```
 
 #### Ground Points for composition
-For multi-object composition, we manually generate a ground plane with relightable 3D Gaussian representation, which can be downloaded [here](https://box.nju.edu.cn/f/f31b03438e0d445f9f90/?dl=1). We put the *ground.ply* in the folder *./point*.
+For multi-object composition, we manually generate a ground plane with relightable 3D Gaussian representation, which can be downloaded [here](https://box.nju.edu.cn/f/c51d9de245f04d0fb872/?dl=1). We put the *ground.ply* in the folder *./point*.
 
 ### Running
 We run the code in a single NVIDIA GeForce RTX 3090 GPU (24G). To reproduce the results in the paper, please run the following code.
@@ -107,6 +114,34 @@ sh script/run_dtu.sh
 Tanks and Temples data: 
 ```
 sh script/run_tnt.sh
+```
+Synthetic4Relight data: 
+```
+sh script/run_syn.sh
+```
+
+### Evaluating
+Run the following command to evaluate Novel View Synthesis:
+```
+# e.g. DTU dataset
+# stage 1
+python eval_nvs.py --eval \
+    -m output/dtu/${i}/3dgs \
+    -c output/dtu/${i}/3dgs/chkpnt30000.pth
+
+# stage 2
+python eval_nvs.py --eval \
+    -m output/dtu/${i}/neilf \
+    -c output/dtu/${i}/neilf/chkpnt50000.pth \
+    -t neilf
+```
+Run the following command to evaluate Relighting (for Synthetic4Relight only):
+```
+# e.g.
+python eval_relighting_syn4.py \
+    -m output/Syn4Relight/hotdog/neilf \
+    -c output/Syn4Relight/hotdog/neilf/chkpnt50000.pth \
+    --sample_num 384
 ```
 ### Composition and Relighting
 Explicit point cloud representation facilitates composition. We recommend that users explore [cloud compare](https://www.cloudcompare.org/) to implement point cloud transformations such as scaling, translation, and rotation to composite a new scene.
@@ -152,68 +187,8 @@ python gui.py -m output/NeRF_Syn/lego/3dgs -t render
 # for relightable 3D Gaussian
 python gui.py -m output/NeRF_Syn/lego/neilf -t neilf
 ```
-### Try on your own data
-We provide here a modified version of [Vis-MVSNet](https://github.com/jzhangbs/Vis-MVSNet) to get the MVS cues for geometry enhancement.
-```
-cd vismvsnet
-```
-(1) Run using shell
-You could change the <Path_to_data>, <img_width>, <img_height> and <src_num> according to your own data in the run_pre.sh. Note that the images and masks should be stored in *<Path_to_data>/input* and *<Path_to_data>/masks*. (Mask == 0: background, Mask==255: Object) And get the filtered MVS depth by:
-```
-sh run_pre.sh
-```
-(2) Or you colud run step by step
-**Step1**. Use COLMAP to convert a collection of un-posed images to posed ones. 
-```
-python convert.py -s <Path_to_data>
-```
-**Step2**. Convert COLMAP data to MVSNet data.
-```
-python colmap2mvsnet.py --dense_folder <Path_to_data> --max_d 256
-```
-**Step3**. Run VisMVSNet. The <img_width>, <img_height> and <src_num> should be determined based on the dataset. 
-```
-python test.py --data_root <Path_to_data> --resize "<img_width>,<img_height>" --crop "<img_width>,<img_heigh>" --num_src <num_src>
-```
-**Step4**. Run depth map filtering.
-```
-python filter.py --data <Path_to_data>/vis_mvsnet --pair <Path_to_data>/pair.txt --view 5 --vthresh 2 --pthresh '.6,.6,.6' --out_dir <Path_to_data>/filtered
-```
-
-Then, run training:
-```
-# 3DGS
-python train.py \
--s <Path_to_data> \
--m <Path_to_output>/3dgs \
---lambda_mask_entropy 0.1 \
---lambda_normal_render_depth 0.01 \
---lambda_normal_mvs_depth 0.01 \
---lambda_depth 1 \
---densification_interval 500 \
---save_training_vis
-
-# R3DG
-python train.py \
--s <Path_to_data> \
--m <Path_to_output>/neilf \
--c <Path_to_output>/3dgs/chkpnt30000.pth \
--t neilf \
---lambda_mask_entropy 0.1 \
---lambda_normal_render_depth 0.01 \
---use_global_shs \
---finetune_visibility \
---iterations 40000 \
---test_interval 1000 \
---checkpoint_interval 2500 \
---lambda_light 0.01 \
---lambda_base_color 0.005 \
---lambda_base_color_smooth 0.006 \
---lambda_metallic_smooth 0.002 \
---lambda_roughness_smooth 0.002 \
---lambda_visibility 0.1 \
---save_training_vis
-```
+### Trying on your own data
+We recommend that users reorganize their own data as neilfpp-like dataset and then optimize. Modified VisMVSNet and auxiliary scripts to prepare your own data will come soon.
 
 ### Citation
 If you find our work useful in your research, please be so kind to cite:

@@ -60,6 +60,7 @@ class RayTracer:
 
     @torch.no_grad()
     def trace_visibility(self, rays_o, rays_d, means3D, symm_inv, opacity, normals):
+        rays_o = rays_o + rays_d * 0.05
         cotrib, opa = _C.trace_bvh_opacity(self.tree, self.aabb,
                                                  rays_o, rays_d,
                                                  means3D, symm_inv,

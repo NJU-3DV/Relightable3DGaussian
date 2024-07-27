@@ -47,8 +47,8 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.debug_cuda = False
-        self.use_global_shs = False
         self.global_shs_degree = 3
+        self.env_resolution = 16
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -61,9 +61,8 @@ class PipelineParams(ParamGroup):
     def __init__(self, parser):
         self.compute_SHs_python = False
         self.compute_cov3D_python = False
-        self.compute_neilf_python = False
         self.tracing = False
-        self.sample_num = 24
+        self.sample_num = 64
         self.debug = False
         self.save_training_vis = False
         self.save_training_vis_iteration = 1000
@@ -74,7 +73,6 @@ class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
 
-        self.use_ldr_image = False  # use learning gamma.
         self.finetune_visibility = False
 
         self.position_lr_init = 0.00016
@@ -86,15 +84,14 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
-        self.gamma_lr = 0.01
-        self.env_lr = 0.0025
-        self.env_rest_lr = 0.0025
+        self.env_lr = 0.1
+        self.env_rest_lr = 0.001
 
         self.base_color_lr = 0.01
         self.roughness_lr = 0.01
-        self.metallic_lr = 0.01
         self.light_lr = 0.001
-        self.light_rest_lr = -1.0
+        self.light_rest_lr = 0.0001
+        self.light_init = 3.0
         self.visibility_lr = 0.0025
         self.visibility_rest_lr = 0.0025
 
@@ -105,21 +102,36 @@ class OptimizationParams(ParamGroup):
         self.densify_until_iter = 10_000
 
         self.densify_grad_threshold = 0.0002
-        self.densify_grad_normal_threshold = 0.000004
+        self.densify_grad_normal_threshold = 2e-9
+        self.normal_densify_from_iter = 0
 
         self.lambda_depth = 0.0
+        self.lambda_depth_smooth = 0.0
         self.lambda_mask_entropy = 0.0
+        
+        self.lambda_opacity = 0.0
+        self.lambda_opacity_start_iteration = 5000
+        self.lambda_surface = 0.0
+        
         self.lambda_normal_render_depth = 0.0
         self.lambda_normal_mvs_depth = 0.0
+        self.lambda_normal_smooth = 0.0
+        self.lambda_point_entropy = 0.0
+        self.lambda_orientation = 0.0
+        self.lambda_orientation_from_iter = 5000
+        self.lambda_depth_var = 0.0
+        self.lambda_scaling = 0.0
 
         self.lambda_dssim = 0.2
         self.lambda_pbr = 1
         self.lambda_light = 0.0
         self.lambda_base_color = 0.0
         self.lambda_base_color_smooth = 0.0
-        self.lambda_metallic_smooth = 0.0
         self.lambda_roughness_smooth = 0.0
+        self.lambda_light_smooth = 0.0
+        self.lambda_visibility_smooth = 0.0
         self.lambda_visibility = 0.0
+        self.lambda_env_smooth = 0.0
 
         super().__init__(parser, "Optimization Parameters")
 
@@ -139,7 +151,6 @@ def get_combined_args(parser: ArgumentParser):
         print("Config file not found at")
         pass
     args_cfgfile = eval(cfgfile_string)
-
     merged_dict = vars(args_cfgfile).copy()
     for k, v in vars(args_cmdline).items():
         if v != None:

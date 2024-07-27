@@ -15,9 +15,8 @@ from utils.camera_utils import Camera, JSON_to_camera
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams
 from utils.system_utils import searchForMaxIteration
-from scene.derect_light_sh import DirectLightEnv
-from utils.graphics_utils import focal2fov, hdr2ldr
-from scene.gamma_trans import LearningGammaTransform
+from scene.direct_light_map import DirectLightMap
+from utils.graphics_utils import focal2fov, rgb_to_srgb
 
 
 def safe_normalize(x, eps=1e-20):
@@ -92,14 +91,7 @@ class OrbitCamera:
 
 class GUI:
     def __init__(self, H, W, fovy, c2w, center, render_fn, render_kwargs, 
-                 mode="render", debug=True, use_hdr2ldr=False):
-        """
-        If the image is hdr, set use_hdr2ldr = True for LDR visualization. [0, 1]
-        If the image is hdr, set use_hdr2ldr = False, the range of the image is not [0,1].
-        """
-        if use_hdr2ldr:
-            print("[GUI INFO] HDR rendered images will be shown in LDR.")
-
+                 mode="render", debug=True):
         self.W = W
         self.H = H
         self.debug = debug
@@ -107,7 +99,6 @@ class GUI:
         translate = c2w[:3, 3] - center
         self.render_fn = render_fn
         self.render_kwargs = render_kwargs
-        self.use_hdr2ldr = use_hdr2ldr
         
         self.cam = OrbitCamera(self.W, self.H, fovy=fovy * 180 / np.pi, rot=rot, translate=translate, center=center)
 
@@ -137,9 +128,6 @@ class GUI:
                 output = (output - output.min()) / (output.max() - output.min())
             elif mode == "num_contrib":
                 output = output.clamp_max(1000) / 1000
-            elif mode == "pbr" or mode == "render":
-                if self.use_hdr2ldr:
-                    output = hdr2ldr(output)
 
             if len(output.shape) == 2:
                 output = output[None]
@@ -362,22 +350,12 @@ if __name__ == '__main__':
 
         env_checkpoint = checkpoint.split("chkpnt")[0] + "env_light_chkpnt" + checkpoint.split("chkpnt")[-1]
         if os.path.exists(env_checkpoint):
-            env_light = DirectLightEnv(dataset.global_shs_degree)
+            env_light = DirectLightMap(dataset.global_shs_degree)
             env_light.create_from_ckpt(env_checkpoint, restore_optimizer=False)
 
             pbr_kwargs["env_light"] = env_light
         else:
             print("cannot find env_light_checkpoint at {}, and env light will be ignore.".format(env_checkpoint))
-            
-        gamma_checkpoint = checkpoint.split("chkpnt")[0] + "gamma_chkpnt" + checkpoint.split("chkpnt")[-1]
-        if os.path.exists(gamma_checkpoint):
-            gamma_transform = LearningGammaTransform(True)
-            gamma_transform.create_from_ckpt(gamma_checkpoint, restore_optimizer=False)
-
-            pbr_kwargs['gamma'] = gamma_transform
-        else:
-            print("cannot find gamma_checkpoint at {}, and gamma transform will be ignore.".format(gamma_checkpoint))
-        
     else:
         if args.iteration == -1:
             loaded_iter = searchForMaxIteration(os.path.join(args.model_path, "point_cloud"))
@@ -421,7 +399,7 @@ if __name__ == '__main__':
     windows = GUI(H, W, fovy,
                   c2w=c2w, center=center,
                   render_fn=render_fn, render_kwargs=render_kwargs,
-                  mode='pbr', use_hdr2ldr=args.hdr2ldr)
+                  mode='pbr')
 
     while True:
         windows.render()

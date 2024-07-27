@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
+from kornia.filters import laplacian, spatial_gradient
 
 
 def gaussian(window_size, sigma):
@@ -94,3 +95,23 @@ def bilateral_smooth_loss(data, image, mask):
     smooth_loss = (data_grad * (-rgb_grad).exp() * mask).mean()
 
     return smooth_loss
+
+
+def second_order_edge_aware_loss(data, img):
+    return (spatial_gradient(data[None], order=2)[0, :, [0, 2]].abs() * torch.exp(-10*spatial_gradient(img[None], order=1)[0].abs())).sum(1).mean()
+
+
+def first_order_edge_aware_loss(data, img):
+    return (spatial_gradient(data[None], order=1)[0].abs() * torch.exp(-spatial_gradient(img[None], order=1)[0].abs())).sum(1).mean()
+
+def first_order_edge_aware_norm_loss(data, img):
+    return (spatial_gradient(data[None], order=1)[0].abs() * torch.exp(-spatial_gradient(img[None], order=1)[0].norm(dim=1, keepdim=True))).sum(1).mean()
+
+def first_order_loss(data):
+    return spatial_gradient(data[None], order=1)[0].abs().sum(1).mean()
+
+def tv_loss(depth):
+    # return spatial_gradient(data[None], order=2)[0, :, [0, 2]].abs().sum(1).mean()
+    h_tv = torch.square(depth[..., 1:, :] - depth[..., :-1, :]).mean()
+    w_tv = torch.square(depth[..., :, 1:] - depth[..., :, :-1]).mean()
+    return h_tv + w_tv

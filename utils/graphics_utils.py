@@ -14,7 +14,7 @@ def fibonacci_sphere_sampling(normals, sample_num, random_rotate=True):
 
     # fibonacci sphere sample around z axis
     idx = torch.arange(sample_num, dtype=torch.float, device='cuda')[None]
-    z = 1 - 2 * idx / (2 * sample_num - 1)
+    z = (1 - 2 * idx / (2 * sample_num - 1)).clamp_min(np.sin(10/180*np.pi))
     rad = torch.sqrt(1 - z ** 2)
     theta = delta * idx
     if random_rotate:
@@ -194,8 +194,38 @@ def fov2focal(fov, pixels):
 def focal2fov(focal, pixels):
     return 2 * math.atan(pixels / (2 * focal))
 
-def hdr2ldr(img, scale=0.666667):
-    img = img * scale
-    # img = 1 - np.exp(-3.0543 * img)  # Filmic
-    img = (img * (2.51 * img + 0.03)) / (img * (2.43 * img + 0.59) + 0.14)  # ACES
-    return img
+
+def rgb_to_srgb(img, clip=True):
+    # hdr img
+    if isinstance(img, np.ndarray):
+        assert len(img.shape) == 3, img.shape
+        assert img.shape[2] == 3, img.shape
+        img = np.where(img > 0.0031308, np.power(np.maximum(img, 0.0031308), 1.0 / 2.4) * 1.055 - 0.055, 12.92 * img)
+        if clip:
+            img = np.clip(img, 0.0, 1.0)
+        return img
+    elif isinstance(img, torch.Tensor):
+        assert len(img.shape) == 3, img.shape
+        assert img.shape[0] == 3, img.shape
+        img = torch.where(img > 0.0031308, torch.pow(torch.max(img, torch.tensor(0.0031308)), 1.0 / 2.4) * 1.055 - 0.055, 12.92 * img)
+        if clip:
+            img = torch.clamp(img, 0.0, 1.0)
+        return img
+    else:
+        raise TypeError("Unsupported input type. Supported types are numpy.ndarray and torch.Tensor.")
+
+
+def srgb_to_rgb(img):
+    # f is LDR
+    if isinstance(img, np.ndarray):
+        assert len(img.shape) == 3, img.shape
+        assert img.shape[2] == 3, img.shape
+        img = np.where(img <= 0.04045, img / 12.92, np.power((np.maximum(img, 0.04045) + 0.055) / 1.055, 2.4))
+        return img
+    elif isinstance(img, torch.Tensor):
+        assert len(img.shape) == 3, img.shape
+        assert img.shape[0] == 3, img.shape
+        img = torch.where(img <= 0.04045, img / 12.92, torch.pow((torch.max(img, torch.tensor(0.04045)) + 0.055) / 1.055, 2.4))
+        return img
+    else:
+        raise TypeError("Unsupported input type. Supported types are numpy.ndarray and torch.Tensor.")

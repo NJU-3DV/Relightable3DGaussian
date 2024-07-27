@@ -12,8 +12,7 @@ from scene.envmap import EnvLight
 from utils.graphics_utils import focal2fov, fov2focal
 from torchvision.utils import save_image
 from tqdm import tqdm
-from bvh import RayTracer
-from gaussian_renderer.neilf_composite import sample_incident_rays
+from utils.graphics_utils import rgb_to_srgb
 
 
 def load_json_config(json_file):
@@ -52,36 +51,6 @@ def scene_composition(scene_dict: dict, dataset: ModelParams):
 
     return gaussians_composite
 
-
-def update_visibility(gaussians, is_bake=True):
-    if is_bake:
-        gaussians.finetune_visibility(iterations=1000)
-    else:
-        raytracer = RayTracer(gaussians.get_xyz, gaussians_composite.get_scaling,
-                              gaussians.get_rotation)
-        gaussians_xyz = gaussians.get_xyz
-        gaussians_inverse_covariance = gaussians.get_inverse_covariance()
-        gaussians_opacity = gaussians.get_opacity[:, 0]
-        gaussians_normal = gaussians.get_normal
-        incident_visibility_results = []
-        chunk_size = gaussians_xyz.shape[0] // ((args.sample_num - 1) // 24 + 1)
-        for offset in tqdm(range(0, gaussians_xyz.shape[0], chunk_size),
-                           "Precompute raytracing visibility"):
-            incident_dirs, _ = sample_incident_rays(gaussians_normal[offset:offset + chunk_size], False,
-                                                    args.sample_num)
-            trace_results = raytracer.trace_visibility(
-                gaussians_xyz[offset:offset + chunk_size, None].expand_as(incident_dirs),
-                incident_dirs,
-                gaussians_xyz,
-                gaussians_inverse_covariance,
-                gaussians_opacity,
-                gaussians_normal)
-            incident_visibility = trace_results["visibility"]
-            incident_visibility_results.append(incident_visibility)
-        incident_visibility_result = torch.cat(incident_visibility_results, dim=0)
-        gaussians._visibility_tracing = incident_visibility_result
-
-    return gaussians
 
 
 def render_points(camera, gaussians):
@@ -128,9 +97,7 @@ if __name__ == '__main__':
     parser.add_argument('--bake', action='store_true', default=False, help="Bake the visibility and refine.")
     parser.add_argument('--video', action='store_true', default=False, help="If True, output video as well.")
     parser.add_argument('--output', default="./capture_trace", help="Output dir.")
-    parser.add_argument('--capture_list',
-                        default="base_color, metallic, normal, pbr ,pbr_env, points, render, roughness, visibility",
-                        help="what should be rendered for output.")
+    parser.add_argument('--capture_list', default="pbr_env", help="what should be rendered for output.")
     args = parser.parse_args()
     dataset = model.extract(args)
     pipe = pipeline.extract(args)
@@ -149,7 +116,7 @@ if __name__ == '__main__':
     gaussians_composite = scene_composition(scene_dict, dataset)
 
     # update visibility
-    gaussians_composite = update_visibility(gaussians_composite, args.bake)
+    gaussians_composite.update_visibility(args.sample_num)
 
     # rendering
     capture_dir = args.output
@@ -163,7 +130,7 @@ if __name__ == '__main__':
     if bg is None:
         bg = 1 if dataset.white_background else 0
     background = torch.tensor([bg, bg, bg], dtype=torch.float32, device="cuda")
-    render_fn = render_fn_dict['neilf_composite']
+    render_fn = render_fn_dict['neilf']
 
     render_kwargs = {
         "pc": gaussians_composite,
@@ -179,10 +146,15 @@ if __name__ == '__main__':
 
     H = traject_dict["camera"]["height"]
     W = traject_dict["camera"]["width"]
-    fovx = traject_dict["camera"]["fov"] * np.pi / 180
+    # fovx = traject_dict["camera"]["fov"] * np.pi / 180
+    fovx = 0.6911112070083618
     fovy = focal2fov(fov2focal(fovx, W), H)
 
     progress_bar = tqdm(traject_dict["trajectory"].items(), desc="Rendering")
+
+    psnr_test = 0.0
+    ssim_test = 0.0
+    lpips_test = 0.0
     for idx, cam_info in progress_bar:
         w2c = np.array(cam_info, dtype=np.float32).reshape(4, 4)
 
@@ -191,10 +163,8 @@ if __name__ == '__main__':
         custom_cam = Camera(colmap_id=0, R=R, T=T,
                             FoVx=fovx, FoVy=fovy, fx=None, fy=None, cx=None, cy=None,
                             image=torch.zeros(3, H, W), image_name=None, uid=0)
-
         if light_dict is not None:
-            light.transform = torch.tensor(light_dict["transform"][idx], dtype=torch.float32, device="cuda").reshape(3,
-                                                                                                                     3)
+            light.transform = torch.tensor(light_dict["transform"][idx], dtype=torch.float32, device="cuda").reshape(3, 3)
 
         with torch.no_grad():
             render_pkg = render_fn(viewpoint_camera=custom_cam, **render_kwargs)
@@ -205,8 +175,10 @@ if __name__ == '__main__':
             elif capture_type == "normal":
                 render_pkg[capture_type] = render_pkg[capture_type] * 0.5 + 0.5
                 render_pkg[capture_type] = render_pkg[capture_type] + (1 - render_pkg['opacity']) * bg
-            elif capture_type in ["base_color", "roughness", "metallic", "visibility"]:
+            elif capture_type in ["base_color", "roughness", "visibility"]:
                 render_pkg[capture_type] = render_pkg[capture_type] + (1 - render_pkg['opacity']) * bg
+            elif capture_type in ["pbr", "pbr_env", "render"]:
+                render_pkg[capture_type] = render_pkg[capture_type]
             save_image(render_pkg[capture_type], f"{capture_dir}/{capture_type}/frame_{idx}.png")
 
     # output as video

@@ -165,3 +165,19 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+def get_minimum_axis(scales, rotations):
+    sorted_idx = torch.argsort(scales, descending=False, dim=-1)
+    R = build_rotation(rotations)
+    R_sorted = torch.gather(R, dim=2, index=sorted_idx[:,None,:].repeat(1, 3, 1)).squeeze()
+    x_axis = R_sorted[:,0,:] # normalized by defaut
+
+    return x_axis
+
+def flip_align_view(normal, viewdir):
+    # normal: (N, 3), viewdir: (N, 3)
+    dotprod = torch.sum(
+        normal * -viewdir, dim=-1, keepdims=True) # (N, 1)
+    non_flip = dotprod>=0 # (N, 1)
+    normal_flipped = normal*torch.where(non_flip, 1, -1) # (N, 3)
+    return normal_flipped, non_flip

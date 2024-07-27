@@ -7,7 +7,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProject
 
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, fx, fy, cx, cy, image, image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda", hdr=False,
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda",
                  height=None, width=None, depth=None, normal=None, image_mask=None):
         super(Camera, self).__init__()
 
@@ -22,7 +22,6 @@ class Camera(nn.Module):
         self.cx = cx
         self.cy = cy
         self.image_name = image_name
-        self.hdr = hdr
 
         try:
             self.data_device = torch.device(data_device)
