@@ -364,6 +364,8 @@ if __name__ == '__main__':
         gaussians.load_ply(
             os.path.join(args.model_path, "point_cloud", "iteration_" + str(loaded_iter), "point_cloud.ply"))
 
+    gaussians.update_visibility(pipe.sample_num)
+    
     render_fn = render_fn_dict[args.type]
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
